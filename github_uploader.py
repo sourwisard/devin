@@ -7,7 +7,8 @@ built-in audio player, then upload selected tracks to GitHub.
 Requirements:
     pip install yt-dlp pillow
     ffplay and ffmpeg must be in PATH  (both come with the ffmpeg install)
-    (ffmpeg is used to convert downloaded tracks to .mp4 before upload)
+    (ffmpeg strips any video stream and converts downloaded tracks to an
+     audio-only .mp4 before upload, kept under GitHub's size limit)
 """
 
 import io
@@ -224,32 +225,62 @@ def download_track(video_url: str, dest_dir: str, progress_cb=None) -> str:
     return max(candidates, key=os.path.getsize)
 
 
-def convert_to_mp4(local_file: str, status_cb=None) -> str:
-    """Convert a downloaded audio file to an .mp4 container if it isn't one
-    already. Uses ffmpeg (AAC audio, no video track). Returns the path to
-    the file that should actually be uploaded (original if already .mp4)."""
-    ext = os.path.splitext(local_file)[1].lower()
-    if ext == ".mp4":
-        return local_file
+# GitHub rejects files over 100 MB; keep uploads comfortably under that.
+MAX_UPLOAD_MB = 25
+# AAC bitrates (kbps) tried from best to worst until the result fits the cap.
+_AUDIO_BITRATES = [192, 160, 128, 96, 64]
 
-    out_file = os.path.splitext(local_file)[0] + ".mp4"
-    if status_cb:
-        status_cb("converting to mp4...")
 
-    cmd = ["ffmpeg", "-y", "-i", local_file,
-           "-vn", "-c:a", "aac", "-b:a", "192k", out_file]
-    result = subprocess.run(
-        cmd, capture_output=True, text=True,
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+def convert_to_mp4(local_file: str, status_cb=None, max_mb: int = MAX_UPLOAD_MB) -> str:
+    """Re-encode a downloaded file to an audio-only .mp4 (AAC), always dropping
+    any video stream (`-vn`) so nothing large is ever uploaded -- yt-dlp's
+    `best` fallback can hand us a full video, which we never want to push since
+    there's no video player. If the audio is still over `max_mb`, re-encode at
+    progressively lower bitrates until it fits. Returns the path to upload."""
+    base = os.path.splitext(local_file)[0]
+    max_bytes = max_mb * 1024 * 1024
+    tmp_out = base + ".audio.m4a"
 
-    if result.returncode != 0 or not os.path.isfile(out_file):
+    result = None
+    fitted = False
+    for br in _AUDIO_BITRATES:
+        if status_cb:
+            status_cb(f"audio {br}k...")
+        cmd = ["ffmpeg", "-y", "-i", local_file,
+               "-vn", "-c:a", "aac", "-b:a", f"{br}k", tmp_out]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        if result.returncode != 0 or not os.path.isfile(tmp_out):
+            raise RuntimeError(
+                f"ffmpeg audio conversion failed: {(result.stderr or '')[-400:]}")
+        if os.path.getsize(tmp_out) <= max_bytes:
+            fitted = True
+            break
+
+    if not fitted:
+        size_mb = os.path.getsize(tmp_out) / (1024 * 1024)
+        try:
+            os.remove(tmp_out)
+        except Exception:
+            pass
         raise RuntimeError(
-            f"ffmpeg conversion to mp4 failed: {(result.stderr or '')[-400:]}")
+            f"audio is {size_mb:.0f} MB even at {_AUDIO_BITRATES[-1]}k, "
+            f"over the {max_mb} MB limit -- skipping (too long to upload).")
 
+    out_file = base + ".mp4"
     try:
-        os.remove(local_file)
+        if os.path.exists(out_file) and os.path.abspath(out_file) != os.path.abspath(tmp_out):
+            os.remove(out_file)
     except Exception:
         pass
+    os.replace(tmp_out, out_file)
+
+    if os.path.abspath(local_file) != os.path.abspath(out_file):
+        try:
+            os.remove(local_file)
+        except Exception:
+            pass
     return out_file
 
 
@@ -1723,9 +1754,8 @@ class UploaderApp(tk.Tk):
                     self.after(0, lambda r=row: r.set_upload_status("downloading", MUTED))
                     local = download_track(track["url"], tmp_dir, progress_cb=_prog)
 
-                    if os.path.splitext(local)[1].lower() != ".mp4":
-                        self.after(0, lambda r=row: r.set_upload_status("converting", MUTED))
-                        local = convert_to_mp4(local)
+                    self.after(0, lambda r=row: r.set_upload_status("converting", MUTED))
+                    local = convert_to_mp4(local, status_cb=_prog)
 
                     self.after(0, lambda r=row: r.set_upload_status("lyrics...", MUTED))
                     track["lyrics"] = fetch_lyrics(title, track.get("uploader", ""))
