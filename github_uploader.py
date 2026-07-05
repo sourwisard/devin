@@ -551,13 +551,27 @@ def save_metadata(path, tracks, playlist_settings):
 
 
 # The 4 placeholder fields are reserved for future per-playlist settings
-# (not read by the worker yet) -- kept alongside showOnWorker so the
+# (not read by the workers yet) -- kept alongside the per-page flags so the
 # schema doesn't need to change again when they're wired up later.
 PLACEHOLDER_KEYS = ["placeholder1", "placeholder2", "placeholder3", "placeholder4"]
 
+# Each bio-page worker reads its own per-page flag out of a playlist's
+# settings to decide whether to surface that playlist. "showOnWorker" is the
+# original flag and stays mapped to the C1oud page for backward compatibility
+# (C1oud.js still reads it); the rest are one per additional page.
+# (settings_key, page_label) -- page_label matches each worker's CONFIG.name.
+WORKER_PAGES = [
+    ("showOnWorker", "C1oud"),
+    ("showOnLay", "lay"),
+    ("showOnCheezit", "cheezit"),
+    ("showOnKat", "Kat"),
+]
+
 
 def default_playlist_settings():
-    settings = {"showOnWorker": False}
+    settings = {}
+    for key, _label in WORKER_PAGES:
+        settings[key] = False
     for key in PLACEHOLDER_KEYS:
         settings[key] = ""
     return settings
@@ -769,7 +783,7 @@ class LibraryDialog(tk.Toplevel):
         self._thumb_images = []
         self._view: Optional[str] = None          # None = "All Tracks"
         self._playlist_orders: dict = {}           # name -> [TrackRow, ...]
-        self._playlist_settings: dict = {}          # name -> {showOnWorker, placeholder1..4}
+        self._playlist_settings: dict = {}          # name -> {showOn<page>..., placeholder1..4}
 
         top = tk.Frame(self, bg=SURFACE, pady=10, padx=16)
         top.pack(fill="x")
@@ -796,22 +810,29 @@ class LibraryDialog(tk.Toplevel):
         self._pills_row.pack(side="left", fill="x", expand=True)
 
         # Per-playlist settings: only shown while a specific playlist tab
-        # (not "All Tracks") is selected. "Show on worker" is the tag that
-        # decides whether the Cloudflare Worker (C1oud.js) will surface this
-        # playlist at all -- untagged playlists never appear there. The 4
+        # (not "All Tracks") is selected. The per-page checkboxes decide which
+        # bio-page worker(s) surface this playlist -- each page reads its own
+        # flag, so a playlist can appear on any combination of pages. The 4
         # "Reserved" boxes aren't used by anything yet; they're just saved
-        # alongside showOnWorker for future features.
+        # alongside the per-page flags for future features.
         self._settings_frame = tk.Frame(self, bg=SURFACE, padx=16, pady=8)
         self._settings_name_lbl = tk.Label(
             self._settings_frame, text="", font=FONT_BODY, bg=SURFACE, fg=TEXT)
         self._settings_name_lbl.pack(side="left", padx=(0, 12))
-        self._show_on_worker_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            self._settings_frame, text="Show on worker",
-            variable=self._show_on_worker_var,
-            bg=SURFACE, activebackground=SURFACE, fg=TEXT, selectcolor=CARD,
-            relief="flat", bd=0, command=self._on_show_on_worker_toggle
-        ).pack(side="left", padx=(0, 16))
+        self._page_vars = {}          # settings_key -> BooleanVar
+        pages_box = tk.Frame(self._settings_frame, bg=SURFACE)
+        pages_box.pack(side="left", padx=(0, 16))
+        tk.Label(pages_box, text="Show on:", font=FONT_TINY,
+                 bg=SURFACE, fg=MUTED).pack(side="left", padx=(0, 6))
+        for key, label in WORKER_PAGES:
+            var = tk.BooleanVar(value=False)
+            self._page_vars[key] = var
+            tk.Checkbutton(
+                pages_box, text=label, variable=var,
+                bg=SURFACE, activebackground=SURFACE, fg=TEXT, selectcolor=CARD,
+                relief="flat", bd=0,
+                command=lambda k=key: self._on_page_toggle(k)
+            ).pack(side="left", padx=(0, 8))
         self._placeholder_entries = []
         for i, key in enumerate(PLACEHOLDER_KEYS):
             box = tk.Frame(self._settings_frame, bg=SURFACE)
@@ -1019,16 +1040,17 @@ class LibraryDialog(tk.Toplevel):
             return
         settings = self._playlist_settings.setdefault(name, default_playlist_settings())
         self._settings_name_lbl.configure(text=name)
-        self._show_on_worker_var.set(bool(settings.get("showOnWorker", False)))
+        for key, var in self._page_vars.items():
+            var.set(bool(settings.get(key, False)))
         for key, var in self._placeholder_entries:
             var.set(settings.get(key, ""))
         self._settings_frame.pack(fill="x", after=self._views_frame)
 
-    def _on_show_on_worker_toggle(self):
+    def _on_page_toggle(self, key):
         if self._view is None:
             return
         settings = self._playlist_settings.setdefault(self._view, default_playlist_settings())
-        settings["showOnWorker"] = self._show_on_worker_var.get()
+        settings[key] = self._page_vars[key].get()
 
     def _on_placeholder_change(self, key):
         if self._view is None:
@@ -1159,7 +1181,7 @@ class LibraryDialog(tk.Toplevel):
                         new_meta.append(e)
 
                 # Merge playlist settings: start from whatever's newest on
-                # the remote (so showOnWorker/reserved boxes toggled
+                # the remote (so per-page/reserved boxes toggled
                 # elsewhere aren't lost), then layer our own edits on top,
                 # and make sure every playlist that still has members ends
                 # up with a settings entry (defaulting to not shown).
