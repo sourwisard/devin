@@ -1,1238 +1,741 @@
 /**
- * Main Hub Worker — sourwisard.workers.dev
- * Landing page that links to both bio pages.
+ * Theme Editor Worker — sourwisard.workers.dev
+ * ============================================
+ * This replaces the old landing hub with a visual THEME EDITOR for the bio
+ * pages. Pick colors with per-color pickers, choose a background effect, watch
+ * a live preview, then hit "Export" to copy a ready-to-paste CONFIG color block
+ * plus the chosen effect's HTML/CSS (and a JSON blob) into the actual pages.
+ *
+ * The original hub page is safe to overwrite -- backups exist elsewhere.
  *
  * Deploy: wrangler deploy  (or paste into a Worker in the Cloudflare dashboard)
  *
- * Everything you'd want to change lives in the CONFIG object below.
+ * The default theme the editor opens with lives in CONFIG below.
  */
 
-// ─── Images ──────────────────────────────────────────────────────────────────
-const PFP_URI = "https://raw.githubusercontent.com/sourwisard/images/main/pwep.png";
-
-// ─── Config ──────────────────────────────────────────────────────────────────
+// Default theme the editor starts from (mirrors the current bio-page theme).
 const CONFIG = {
-  name: "sourwisard",
-  username: "sourwisard",         // shown inside the tagline bubble header
-  avatarImage: PFP_URI,           // set to "" to fall back to avatarEmoji
-  avatarEmoji: "🌙",
-
-  taglines: [
-    "hey :3",
-    "welcome",
-    "you can find other pages in the top right",
-    "made these for you",
-    "hope you like it",
-    "meow",
-    "you're short",
-  ],
-
-  // ─── Colors ────────────────────────────────────────────────────────────────
-  accentColor:  "#7dd3fc",                  // primary accent
-  accentColor2: "#c084fc",                  // secondary accent
+  accentColor:  "#7dd3fc",
+  accentColor2: "#c084fc",
   bodyBg:       "#2a1248 0%, #160a2e 45%, #0a0414 100%",
   panelBg:      "rgba(18, 16, 28, 0.55)",
   textColor:    "#f4f3f7",
   overlayDark:  "rgba(5, 2, 12, 0.92)",
-  // ───────────────────────────────────────────────────────────────────────────
-
-  // ─── Profile link cards ────────────────────────────────────────────────────
-  // Each entry becomes a clickable card below the main card.
-  profiles: [
-    {
-      name:   "Kat",
-      url:    "https://kat.sourwisard.workers.dev/",
-      avatar: "https://raw.githubusercontent.com/sourwisard/images/main/pfp.webp",
-      desc:   "cutie kat",
-    },
-    {
-      name:   "C1oud",
-      url:    "https://c1oud.sourwisard.workers.dev/",
-      avatar: "https://raw.githubusercontent.com/sourwisard/images/main/C1oud.png",
-      desc:   "volume warning!, C1oud",
-    },
-	{
-      name:   "lay",
-      url:    "https://lay.sourwisard.workers.dev/",
-      avatar: "https://raw.githubusercontent.com/sourwisard/images/main/lay.png",
-      desc:   "⋆˚𝜗 Bal💜ylay 𝜚˚⋆",
-    },
-	{
-      name:   "cheezit",
-      url:    "https://cheezit.sourwisard.workers.dev/",
-      avatar: "https://raw.githubusercontent.com/sourwisard/images/main/cheezit.png",
-      desc:   "cheezit my pookie",
-    },
-  ],
+  playBtnText:  "#ffffff",
+  // Which background effect is selected by default (key from EFFECTS below).
+  backgroundEffect: "stars",
 };
 
-// ─── Where the track/playlist data lives ───────────────────────────────
-// Tracks and playlists are pulled at page-load time from the GitHub repo's
-// metadata.json (the file github_uploader.py pushes to). All playlists are
-// shown here regardless of any "showOnWorker" tag, plus a merged "All" list.
-const REPO_OWNER  = "sourwisard";
-const REPO_NAME   = "depo";
-const REPO_BRANCH = "main";
-
-const RAW_BASE     = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/`;
-const METADATA_URL = RAW_BASE + "metadata.json";
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
 function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, c => ({
+  return String(str).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
 }
-function escapeAttr(str) { return escapeHtml(str); }
 
-const NAV_LINKS = [
-  { name: "Home", url: "https://main.sourwisard.workers.dev/" },
-  { name: "Kat", url: "https://kat.sourwisard.workers.dev/", avatar: "https://raw.githubusercontent.com/sourwisard/images/main/pfp.webp" },
-  { name: "C1oud", url: "https://c1oud.sourwisard.workers.dev/", avatar: "https://raw.githubusercontent.com/sourwisard/images/main/C1oud.png" },
-  { name: "lay", url: "https://lay.sourwisard.workers.dev/", avatar: "https://raw.githubusercontent.com/sourwisard/images/main/lay.png" },
-  { name: "cheezit", url: "https://cheezit.sourwisard.workers.dev/", avatar: "https://raw.githubusercontent.com/sourwisard/images/main/cheezit.png" },
-];
-
-function renderTopBar(currentName) {
-  const home = NAV_LINKS[0];
-  const profiles = NAV_LINKS.slice(1);
-  return `
-  <div class="topbar">
-    <a class="topbar-home${currentName === "Home" ? " active" : ""}" href="${escapeAttr(home.url)}">
-      <span>${escapeHtml(home.name)}</span>
-    </a>
-    <div class="topbar-profiles">
-      ${profiles.map(p => `
-      <a class="topbar-avatar${p.name === currentName ? " active" : ""}" href="${escapeAttr(p.url)}" title="${escapeAttr(p.name)}">
-        <img src="${escapeAttr(p.avatar)}" alt="${escapeAttr(p.name)}" />
-      </a>`).join("")}
-    </div>
-  </div>`;
-}
-
-
-function renderAvatar(cfg) {
-  if (cfg.avatarImage) {
-    return `<div class="avatar avatar-img"><img src="${escapeAttr(cfg.avatarImage)}" alt="${escapeAttr(cfg.name)}" /></div>`;
-  }
-  return `<div class="avatar">${cfg.avatarEmoji}</div>`;
-}
-
-function renderPlayer() {
-  return `
-  <div class="player">
-    <div class="player-status" id="playerStatus">Loading tracks…</div>
-    <div class="player-top" id="playerTop" style="display:none;">
-      <div class="player-art"><img id="playerArt" src="" alt="" /></div>
-      <div class="player-meta">
-        <div class="player-title" id="playerTitle"></div>
-        <div class="player-artist" id="playerArtist"></div>
-        <div class="player-bar">
-          <span id="cur">0:00</span>
-          <input id="seek" type="range" min="0" max="100" value="0" />
-          <span id="dur">0:00</span>
-        </div>
-      </div>
-    </div>
-    <div class="player-lyrics" id="playerLyrics"></div>
-    <div class="player-controls" id="playerControls" style="display:none;">
-      <button id="prevBtn" class="skip-btn" aria-label="Previous">⏮</button>
-      <button id="playBtn" class="play-btn" aria-label="Play"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l10-5.5z"/></svg></button>
-      <button id="nextBtn" class="skip-btn" aria-label="Next">⏭</button>
-      <span class="player-count" id="playerCount"></span>
-    </div>
-    <div class="volume-group" id="volumeGroup" style="display:none;">
-      <button id="volBtn" class="vol-btn" aria-label="Volume">
-        <svg id="volIcon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 6h2.6L8 3.2v9.6L4.6 10H2z"/><path d="M10.2 5.2a3 3 0 0 1 0 5.6v-1.3a1.7 1.7 0 0 0 0-3z"/></svg>
-      </button>
-      <input id="volSlider" class="vol-slider" type="range" min="0" max="100" value="100" aria-label="Volume level" />
-    </div>
-    <audio id="audio" preload="metadata"></audio>
-    <div class="playlists-panel" id="playlistsPanel" style="display:none;">
-      <div class="playlists-label">Playlists</div>
-      <div class="playlists-row" id="playlistsRow"></div>
-    </div>
-  </div>`;
-}
-
-function renderProfileCards(profiles) {
-  return profiles.map(p => `
-  <a class="profile-card" href="${escapeAttr(p.url)}" target="_blank" rel="noopener">
-    <div class="profile-card-avatar">
-      <img src="${escapeAttr(p.avatar)}" alt="${escapeAttr(p.name)}" />
-    </div>
-    <div class="profile-card-meta">
-      <div class="profile-card-name">${escapeHtml(p.name)}</div>
-      <div class="profile-card-desc">${escapeHtml(p.desc)}</div>
-    </div>
-    <div class="profile-card-arrow">→</div>
-  </a>`).join("\n");
-}
-
-// ─── Page ────────────────────────────────────────────────────────────────────
 function renderPage(cfg) {
+  const initialTheme = {
+    accentColor:  cfg.accentColor,
+    accentColor2: cfg.accentColor2,
+    bodyBg:       cfg.bodyBg,
+    panelBg:      cfg.panelBg,
+    textColor:    cfg.textColor,
+    overlayDark:  cfg.overlayDark,
+    playBtnText:  cfg.playBtnText,
+  };
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>${escapeHtml(cfg.name)}</title>
+<title>Theme Editor · sourwisard</title>
 <style>
   :root {
-    --accent:       ${cfg.accentColor};
-    --accent2:      ${cfg.accentColor2};
-    --panel-bg:     ${cfg.panelBg};
-    --text:         ${cfg.textColor};
-    --overlay-dark: ${cfg.overlayDark};
+    --ui-bg: #0c0714;
+    --ui-panel: #150d24;
+    --ui-panel2: #1d1330;
+    --ui-border: rgba(255,255,255,0.10);
+    --ui-text: #ece9f5;
+    --ui-muted: #a99fc4;
+    --ui-accent: #b98bff;
   }
   * { box-sizing: border-box; }
-  html, body {
-    min-height: 100%;
-    margin: 0;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    color: var(--text);
-  }
+  html, body { margin: 0; height: 100%; }
   body {
-    background: radial-gradient(circle at 50% 0%, ${cfg.bodyBg});
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: flex-start;
-    position: relative;
-    padding: 48px 20px;
-    gap: 20px;
-    overflow-x: hidden;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--ui-bg);
+    color: var(--ui-text);
+    overflow: hidden;
+  }
+  .editor {
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    height: 100vh;
+  }
+  @media (max-width: 820px) {
+    .editor { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+    body { overflow: auto; }
+  }
+
+  /* ── Controls panel ── */
+  .controls {
+    background: var(--ui-panel);
+    border-right: 1px solid var(--ui-border);
+    padding: 20px;
     overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
+  }
+  .controls h1 { font-size: 18px; margin: 0 0 2px; letter-spacing: .3px; }
+  .controls .sub { font-size: 12px; color: var(--ui-muted); margin: 0 0 18px; line-height: 1.5; }
+  .controls h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--ui-muted); margin: 22px 0 10px; font-weight: 700;
   }
 
-  /* ── Stars ── */
-  .stars {
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    background-image:
-      radial-gradient(1px 1px at 10% 20%, rgba(255,255,255,.5), transparent),
-      radial-gradient(1px 1px at 80% 10%, rgba(255,255,255,.4), transparent),
-      radial-gradient(2px 2px at 60% 70%, rgba(255,255,255,.3), transparent),
-      radial-gradient(1px 1px at 30% 80%, rgba(255,255,255,.4), transparent),
-      radial-gradient(1px 1px at 90% 60%, rgba(255,255,255,.3), transparent);
-    animation: drift 60s linear infinite;
-    opacity: .8;
+  .field {
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 0;
   }
-  @keyframes drift {
-    from { transform: translateY(0); }
-    to   { transform: translateY(-200px); }
+  .field label {
+    flex: 1; font-size: 13px; color: var(--ui-text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-
-  /* ── Enter screen ── */
-  .enter-screen {
-    position: fixed;
-    inset: 0;
-    z-index: 200;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(5,2,12,0.55);
-    cursor: pointer;
-    transition: opacity .6s ease;
+  input[type="color"] {
+    width: 34px; height: 30px; padding: 0; border: 1px solid var(--ui-border);
+    border-radius: 8px; background: none; cursor: pointer; flex-shrink: 0;
   }
-  .enter-screen.hidden {
-    opacity: 0;
-    pointer-events: none;
+  input[type="text"] {
+    width: 150px; font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+    font-size: 11.5px; padding: 6px 8px; border-radius: 8px;
+    border: 1px solid var(--ui-border); background: var(--ui-panel2);
+    color: var(--ui-text);
   }
-  .enter-box { text-align: center; }
-  .enter-text {
-    font-size: 14px;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: var(--text);
-    padding: 16px 28px;
-    border: 1px solid rgba(255,255,255,0.25);
-    border-radius: 999px;
-    background: rgba(255,255,255,0.06);
-    backdrop-filter: blur(6px);
-    animation: pulseEnter 1.8s ease-in-out infinite;
-  }
-  @keyframes pulseEnter {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0.12); }
-    50%       { box-shadow: 0 0 0 10px rgba(255,255,255,0); }
+  input[type="text"].wide { width: 100%; }
+  input[type="range"] { width: 76px; accent-color: var(--ui-accent); cursor: pointer; flex-shrink: 0; }
+  input[type="number"] {
+    width: 58px; font-size: 11.5px; padding: 6px 6px; border-radius: 8px;
+    border: 1px solid var(--ui-border); background: var(--ui-panel2); color: var(--ui-text);
   }
 
-  /* ── Page content ── */
-  .page-content {
-    transition: filter .6s ease;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 20px;
-    width: 100%;
+  .grad-stop { display: flex; align-items: center; gap: 8px; padding: 5px 0; }
+  .grad-stop .pos-unit { font-size: 12px; color: var(--ui-muted); }
+  .mini-btn {
+    border: 1px solid var(--ui-border); background: var(--ui-panel2);
+    color: var(--ui-muted); border-radius: 8px; cursor: pointer;
+    font-size: 13px; width: 28px; height: 28px; line-height: 1; flex-shrink: 0;
   }
-  .page-content.blurred {
-    filter: blur(18px);
-    pointer-events: none;
+  .mini-btn:hover { color: #ff9a9a; border-color: #ff9a9a55; }
+  .add-stop {
+    margin-top: 6px; font-size: 12px; padding: 6px 12px; width: auto;
+    height: auto; color: var(--ui-text);
   }
+  .add-stop:hover { color: var(--ui-accent); border-color: var(--ui-accent); }
 
-  /* ── Main card ── */
-  .card {
+  /* ── Effect option grid ── */
+  .fx-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .fx-opt {
+    border: 1px solid var(--ui-border); background: var(--ui-panel2);
+    border-radius: 10px; padding: 10px; cursor: pointer; text-align: left;
+    color: var(--ui-text); font-size: 12.5px; font-weight: 600;
+    transition: border-color .15s ease, background .15s ease, transform .1s ease;
+    position: relative; overflow: hidden; height: 52px;
+  }
+  .fx-opt .swatch {
+    position: absolute; inset: 0; opacity: .5; pointer-events: none;
+  }
+  .fx-opt span { position: relative; z-index: 1; }
+  .fx-opt:hover { transform: translateY(-1px); }
+  .fx-opt.active { border-color: var(--ui-accent); background: #241640; }
+
+  .actions { display: flex; gap: 10px; margin-top: 24px; }
+  .btn {
+    flex: 1; padding: 11px 14px; border-radius: 10px; border: none;
+    font-size: 13px; font-weight: 700; cursor: pointer;
+    background: linear-gradient(120deg, #7dd3fc, #c084fc); color: #10071c;
+  }
+  .btn:hover { filter: brightness(1.06); }
+  .btn.ghost { background: var(--ui-panel2); color: var(--ui-muted); border: 1px solid var(--ui-border); }
+  .btn.ghost:hover { color: var(--ui-text); }
+
+  /* ── Preview ── */
+  .preview {
     position: relative;
-    z-index: 2;
-    width: min(380px, 90vw);
-    padding: 36px 28px 28px;
-    border-radius: 20px;
-    background: var(--panel-bg);
-    backdrop-filter: blur(18px);
+    overflow: hidden;
+    transform: translateZ(0);   /* contains the position:fixed effect layer */
+    display: flex; align-items: center; justify-content: center;
+    padding: 32px;
+  }
+  #previewRoot {
+    position: absolute; inset: 0;
+    background: radial-gradient(circle at 50% 0%, ${escapeHtml(cfg.bodyBg)});
+    --accent: ${escapeHtml(cfg.accentColor)};
+    --accent2: ${escapeHtml(cfg.accentColor2)};
+    --panel-bg: ${escapeHtml(cfg.panelBg)};
+    --text: ${escapeHtml(cfg.textColor)};
+    --overlay-dark: ${escapeHtml(cfg.overlayDark)};
+    --play-text: ${escapeHtml(cfg.playBtnText)};
+  }
+  .preview-scroll {
+    position: relative; z-index: 2; width: 100%;
+    max-height: 100%; overflow-y: auto;
+    display: flex; flex-direction: column; align-items: center; gap: 18px;
+    padding: 8px;
+  }
+  .preview-hint {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    z-index: 3; font-size: 11px; color: rgba(255,255,255,0.5);
+    background: rgba(0,0,0,0.35); padding: 5px 12px; border-radius: 999px;
+    backdrop-filter: blur(6px);
+  }
+
+  /* base effect layer -- SAME rule the exported effect uses */
+  .bg-fx { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+
+  /* ── Mock bio card (mirrors the real page classes) ── */
+  .card {
+    width: min(360px, 88vw); padding: 30px 24px 24px; border-radius: 20px;
+    background: var(--panel-bg); backdrop-filter: blur(18px);
     border: 1px solid rgba(255,255,255,0.08);
     box-shadow: 0 0 60px -10px var(--accent2), 0 20px 60px rgba(0,0,0,0.5);
-    text-align: center;
-    animation: rise .6s ease;
+    text-align: center; color: var(--text);
   }
-  @keyframes rise {
-    from { opacity: 0; transform: translateY(16px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-
-  /* ── Avatar ── */
   .avatar {
-    width: 92px;
-    height: 92px;
-    margin: 0 auto 14px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 42px;
+    width: 84px; height: 84px; margin: 0 auto 14px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-size: 38px;
     background: linear-gradient(140deg, var(--accent), var(--accent2));
     box-shadow: 0 0 0 4px rgba(255,255,255,0.06), 0 0 30px -4px var(--accent);
-    animation: float 4s ease-in-out infinite;
   }
-  @keyframes float {
-    0%, 100% { transform: translateY(0); }
-    50%       { transform: translateY(-6px); }
-  }
-  .avatar-img { overflow: hidden; background: #000; }
-  .avatar-img img { width: 100%; height: 100%; object-fit: cover; }
-
-  /* ── Name ── */
   .name {
-    font-size: 22px;
-    font-weight: 700;
+    font-size: 22px; font-weight: 700; letter-spacing: .5px; margin-bottom: 8px;
     background: linear-gradient(90deg, var(--accent), var(--accent2));
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    margin-bottom: 6px;
-    letter-spacing: 0.5px;
+    -webkit-background-clip: text; background-clip: text; color: transparent;
   }
-
-  /* ── Tagline bubble ── */
-  .tagline {
-    font-size: 13.5px;
-    color: rgba(244,243,247,0.75);
-    margin-bottom: 4px;
-    line-height: 1.4;
-    text-align: left;
-    height: 80px;
-  }
-  .tagline-inner {
-    display: flex;
-    align-items: flex-start;
-    text-align: left;
-    width: 100%;
-    gap: 10px;
-  }
-  .typing-icon {
-    width: 40px;
-    height: 40px;
-    flex-shrink: 0;
-    object-fit: cover;
-    border-radius: 50%;
-    background: rgba(255,255,255,0.08);
-    border: none;
-    padding: 0;
-    box-sizing: border-box;
-    margin-top: 2px;
-  }
-  .tagline-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 4px;
-    font-weight: 500;
-  }
-  .tagline-username { color: #ffffff; font-weight: 600; }
   .tagline-bubble {
-    display: block;
-    background: rgba(255,255,255,0.08);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 16px;
-    padding: 9px 13px;
-    max-width: 100%;
-    min-height: 2.8em;
-    line-height: 1.4;
+    display: inline-block; font-size: 13px; color: rgba(255,255,255,0.8);
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px; padding: 8px 13px; margin-bottom: 16px;
   }
-  .tagline .cursor {
-    display: inline-block;
-    width: 2px;
-    height: 1em;
-    vertical-align: middle;
-    margin-left: 1px;
-    background: rgba(244,243,247,0.6);
-    animation: blink 0.9s step-end infinite;
-  }
-  @keyframes blink {
-    0%, 100% { opacity: 1; }
-    50%       { opacity: 0; }
-  }
-
-  /* ── Profile link cards ── */
-  .profile-card {
-    position: relative;
-    z-index: 2;
-    width: min(380px, 90vw);
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 14px 16px;
-    border-radius: 16px;
-    background: var(--panel-bg);
-    backdrop-filter: blur(18px);
-    border: 1px solid rgba(255,255,255,0.08);
-    box-shadow: 0 10px 30px rgba(0,0,0,0.4);
-    text-decoration: none;
-    color: var(--text);
-    cursor: pointer;
-    transition: transform .15s ease, background .15s ease, box-shadow .15s ease;
-    animation: rise .6s ease;
-  }
-  .profile-card:hover {
-    transform: translateY(-3px);
-    background: rgba(255,255,255,0.09);
-    box-shadow: 0 0 40px -8px var(--accent2), 0 14px 36px rgba(0,0,0,0.5);
-  }
-  .profile-card-avatar {
-    width: 52px;
-    height: 52px;
-    border-radius: 50%;
-    overflow: hidden;
-    flex-shrink: 0;
-    background: linear-gradient(140deg, var(--accent), var(--accent2));
-    box-shadow: 0 0 0 2px rgba(255,255,255,0.08), 0 0 16px -4px var(--accent);
-  }
-  .profile-card-avatar img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-  }
-  .profile-card-meta {
-    flex: 1;
-    min-width: 0;
-    text-align: left;
-  }
-  .profile-card-name {
-    font-size: 15px;
-    font-weight: 700;
-    background: linear-gradient(90deg, var(--accent), var(--accent2));
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    margin-bottom: 2px;
-  }
-  .profile-card-desc {
-    font-size: 12px;
-    color: rgba(244,243,247,0.5);
-  }
-  .profile-card-arrow {
-    font-size: 16px;
-    color: rgba(244,243,247,0.3);
-    flex-shrink: 0;
-    transition: color .15s ease, transform .15s ease;
-  }
-  .profile-card:hover .profile-card-arrow {
-    color: var(--accent);
-    transform: translateX(3px);
-  }
-  body { padding-top: 76px; }
-  .topbar {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    z-index: 300;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 12px 20px;
-    background: rgba(10, 4, 20, 0.65);
-    backdrop-filter: blur(14px);
-    border-bottom: 1px solid rgba(255,255,255,0.08);
-  }
-  .topbar-home {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    color: #f4f3f7;
-    text-decoration: none;
-    font-size: 17px;
-    font-weight: 700;
-    letter-spacing: 0.2px;
-    padding: 10px 18px;
-    min-height: 44px;
-    border-radius: 999px;
-    background: rgba(255,255,255,0.08);
-    border: 1px solid rgba(255,255,255,0.14);
-    box-shadow: 0 2px 10px rgba(0,0,0,0.25);
-    opacity: 0.92;
-    flex-shrink: 0;
-    -webkit-tap-highlight-color: transparent;
-    touch-action: manipulation;
-    transition: opacity .15s ease, background .15s ease, transform .1s ease, border-color .15s ease;
-  }
-  .topbar-home:hover {
-    opacity: 1;
-    background: rgba(255,255,255,0.14);
-  }
-  .topbar-home:active {
-    transform: scale(0.96);
-    background: rgba(255,255,255,0.18);
-  }
-  .topbar-home.active {
-    opacity: 1;
-    border-color: var(--accent, #7dd3fc);
-  }
-  @media (max-width: 420px) {
-    .topbar { padding: 10px 14px; gap: 10px; }
-    .topbar-home { font-size: 15px; padding: 9px 14px; }
-    .topbar-avatar { width: 30px; height: 30px; }
-    .topbar-profiles { gap: 8px; }
-  }
-  .topbar-profiles {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .topbar-avatar {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    overflow: hidden;
-    display: block;
-    border: 2px solid transparent;
-    opacity: 0.7;
-    flex-shrink: 0;
-    transition: opacity .15s ease, border-color .15s ease, transform .15s ease;
-  }
-  .topbar-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .topbar-avatar:hover { opacity: 1; transform: translateY(-1px); }
-  .topbar-avatar.active { opacity: 1; border-color: var(--accent, #7dd3fc); }
-
-  /* ── Music player ── */
   .player {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 14px;
-    padding: 12px 14px;
-    text-align: left;
-    width: 100%;
-    margin-top: 18px;
+    display: flex; flex-direction: column; gap: 10px; text-align: left;
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px; padding: 12px;
   }
-  .player-top {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-  }
+  .player-top { display: flex; align-items: center; gap: 10px; }
   .player-art {
-    width: 44px;
-    height: 44px;
-    border-radius: 8px;
+    width: 42px; height: 42px; border-radius: 8px; flex-shrink: 0;
     background: linear-gradient(140deg, var(--accent2), var(--accent));
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    overflow: hidden;
   }
-  .player-art img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-  }
-  .player-meta { flex: 1; min-width: 0; }
-  .player-title {
-    font-size: 12.5px;
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .player-artist {
-    font-size: 11px;
-    color: rgba(244,243,247,0.5);
-    margin-bottom: 4px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .player-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 10px;
-    color: rgba(244,243,247,0.5);
-    min-width: 0;
-  }
-  .player-bar span {
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .player-bar input[type="range"] {
-    flex: 1;
-    min-width: 0;
-    height: 3px;
-    accent-color: var(--accent);
-    cursor: pointer;
-  }
-  .player-lyrics {
-    margin-top: 10px;
-    height: 140px;
-    overflow: hidden;
-    text-align: center;
-    border-top: 1px solid rgba(255,255,255,0.08);
-    position: relative;
-  }
-  .player-lyrics.plain {
-    overflow-y: auto;
-    height: 160px;
-  }
-  .player-lyrics-track {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1);
-    will-change: transform;
-  }
-  @keyframes lyric-shimmer {
-    0%   { background-position: 100% center; }
-    100% { background-position: -100% center; }
-  }
-  .player-lyric-line {
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1.5;
-    width: 100%;
-    padding: 4px 10px;
-    box-sizing: border-box;
-    white-space: normal;
-    word-break: break-word;
-    color: color-mix(in srgb, var(--accent) 30%, transparent);
-    transition: color 0.75s ease, font-size 0.75s cubic-bezier(0.16, 1, 0.3, 1), font-weight 0.6s ease, opacity 0.75s ease;
-  }
-  .player-lyrics.plain .player-lyric-line {
-    color: rgba(244,243,247,0.75);
-    padding: 3px 4px;
-  }
-  .player-lyric-line.active {
-    font-size: 13.5px;
-    font-weight: 600;
-    background: linear-gradient(
-      90deg,
-      var(--accent) 0%,
-      color-mix(in srgb, var(--accent) 70%, #fff) 30%,
-      #ffffff 48%,
-      color-mix(in srgb, var(--accent) 50%, #fff) 52%,
-      var(--accent) 70%,
-      color-mix(in srgb, var(--accent) 70%, #fff) 100%
-    );
-    background-size: 200% auto;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    animation: lyric-shimmer 2s linear infinite;
-  }
-  .player-status {
-    font-size: 11.5px;
-    color: rgba(244,243,247,0.5);
-    text-align: center;
-    padding: 4px 0;
-  }
-  .player-status.error {
-    color: #ff8080;
-  }
-  .player-controls {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 16px;
-    padding-right: 0;
-    width: 100%;
-    order: 1;
-  }
+  .player-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+  .player-artist { font-size: 11px; color: rgba(255,255,255,0.5); }
+  .seek { height: 3px; border-radius: 2px; background: rgba(255,255,255,0.15); margin-top: 8px; }
+  .seek > i { display: block; width: 40%; height: 100%; border-radius: 2px; background: var(--accent); }
+  .player-controls { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 4px; }
   .play-btn {
-    width: 34px;
-    height: 34px;
-    border-radius: 50%;
-    border: none;
-    background: var(--accent);
-    color: #ffffff;
-    cursor: pointer;
-    flex-shrink: 0;
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: transform .15s ease;
+    width: 32px; height: 32px; border-radius: 50%; border: none;
+    background: var(--accent); color: var(--play-text);
+    display: flex; align-items: center; justify-content: center;
   }
-  .play-btn:active {
-    transform: scale(0.92);
-  }
-  .skip-btn {
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    border: none;
-    background: rgba(255,255,255,0.08);
-    color: rgba(244,243,247,0.8);
-    cursor: pointer;
-    flex-shrink: 0;
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: transform .15s ease, color .15s ease, background .15s ease;
-  }
-  .skip-btn:hover {
-    color: var(--accent);
-    background: rgba(255,255,255,0.14);
-  }
-  .skip-btn:active {
-    transform: scale(0.92);
-  }
-  .player-count {
-    position: absolute;
-    right: 0;
-    font-size: 10.5px;
-    color: rgba(244,243,247,0.45);
-    flex-shrink: 0;
-  }
-  .volume-group {
-    position: relative;
-    left: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    order: 2;
-  }
-  .vol-btn {
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    border: none;
-    background: rgba(255,255,255,0.08);
-    color: rgba(244,243,247,0.75);
-    cursor: pointer;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: color .15s ease, background .15s ease;
-  }
-  .vol-btn:hover {
-    color: var(--accent);
-    background: rgba(255,255,255,0.14);
-  }
-  .vol-slider {
-    width: 100%;
-    opacity: 1;
-    height: 3px;
-    accent-color: var(--accent);
-    cursor: pointer;
-    transition: width .2s ease, opacity .2s ease, margin .2s ease;
-    margin-left: 2px;
-    flex: 1;
-  }
-  .playlists-panel {
-    margin-top: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .playlists-label {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    color: rgba(244,243,247,0.45);
-    padding: 0 2px;
-  }
-  .playlists-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .playlist-pill {
-    border: 1px solid rgba(255,255,255,0.12);
+  .skip { color: rgba(255,255,255,0.75); font-size: 12px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .pill {
+    font-size: 12px; font-weight: 600; padding: 6px 13px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.12); color: rgba(255,255,255,0.8);
     background: rgba(255,255,255,0.05);
-    color: rgba(244,243,247,0.8);
-    font-size: 12px;
-    font-weight: 600;
-    padding: 7px 14px;
-    border-radius: 999px;
-    cursor: pointer;
-    transition: background .15s ease, border-color .15s ease, color .15s ease, transform .15s ease;
   }
-  .playlist-pill:hover {
-    background: rgba(255,255,255,0.1);
-    transform: translateY(-1px);
+  .pill.active { background: linear-gradient(120deg, var(--accent), var(--accent2)); color: #fff; border-color: transparent; }
+  .enter-chip {
+    font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase;
+    color: var(--text); padding: 12px 22px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.25); background: var(--overlay-dark);
   }
-  .playlist-pill.active {
-    background: linear-gradient(120deg, var(--accent), var(--accent2));
-    border-color: transparent;
-    color: #fff;
+
+  /* ── Export modal ── */
+  .modal {
+    position: fixed; inset: 0; z-index: 500; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(4,2,10,0.7); backdrop-filter: blur(4px); padding: 24px;
   }
+  .modal.open { display: flex; }
+  .modal-box {
+    width: min(680px, 95vw); max-height: 88vh; overflow: hidden;
+    background: var(--ui-panel); border: 1px solid var(--ui-border);
+    border-radius: 16px; display: flex; flex-direction: column;
+  }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--ui-border); }
+  .modal-head h2 { margin: 0; font-size: 15px; }
+  .modal-body { padding: 16px 18px; overflow-y: auto; }
+  .modal textarea {
+    width: 100%; height: 320px; resize: vertical;
+    font-family: ui-monospace, "Cascadia Code", Menlo, monospace; font-size: 12px;
+    line-height: 1.5; padding: 12px; border-radius: 10px;
+    border: 1px solid var(--ui-border); background: #0c0818; color: #d7d2ea;
+  }
+  .modal-foot { display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--ui-border); }
 </style>
 </head>
 <body>
-  ${renderTopBar("Home")}
+  <div class="editor">
+    <aside class="controls">
+      <h1>Theme Editor</h1>
+      <p class="sub">Tweak colors and pick a background, watch the live preview, then export a ready-to-paste block for the bio pages.</p>
 
-  <div id="pageContent" class="page-content">
-    <div class="stars"></div>
+      <h2>Colors</h2>
+      <div id="colorFields"></div>
 
-    <div class="card">
-      ${renderAvatar(cfg)}
-      <div class="name">${escapeHtml(cfg.name)}</div>
-      <div class="tagline">
-        <div class="tagline-inner">
-          <img class="typing-icon" src="${escapeAttr(cfg.avatarImage || '')}" alt="" />
-          <div style="flex: 1;">
-            <div class="tagline-header">
-              <span class="tagline-username">${escapeHtml(cfg.username)}</span>
+      <h2>Body gradient</h2>
+      <div id="gradFields"></div>
+      <button class="mini-btn add-stop" id="addStop">+ add stop</button>
+
+      <h2>Background effect</h2>
+      <div class="fx-grid" id="fxGrid"></div>
+
+      <div class="actions">
+        <button class="btn" id="exportBtn">Export</button>
+        <button class="btn ghost" id="resetBtn">Reset</button>
+      </div>
+    </aside>
+
+    <main class="preview">
+      <div id="previewRoot"></div>
+      <div id="fxLayer"></div>
+      <div class="preview-hint">live preview</div>
+      <div class="preview-scroll">
+        <div class="card">
+          <div class="avatar">🌙</div>
+          <div class="name">sourwisard</div>
+          <div class="tagline-bubble">preview of your theme :3</div>
+          <div class="player">
+            <div class="player-top">
+              <div class="player-art"></div>
+              <div>
+                <div class="player-title">Late Night Walks</div>
+                <div class="player-artist">Teddy Vogel</div>
+                <div class="seek"><i></i></div>
+              </div>
             </div>
-            <span class="tagline-bubble">
-              <span id="taglineText"></span><span class="cursor"></span>
-            </span>
+            <div class="player-controls">
+              <span class="skip">⏮</span>
+              <button class="play-btn">▶</button>
+              <span class="skip">⏭</span>
+            </div>
+            <div class="pills">
+              <span class="pill active">chill</span>
+              <span class="pill">hype</span>
+              <span class="pill">late</span>
+            </div>
           </div>
         </div>
+        <div class="enter-chip">click to enter</div>
       </div>
-      ${renderPlayer()}
+    </main>
+  </div>
+
+  <div class="modal" id="modal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2>Export theme</h2>
+        <button class="mini-btn" id="modalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <textarea id="exportText" spellcheck="false" readonly></textarea>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="copyBtn">Copy to clipboard</button>
+        <button class="btn ghost" id="modalClose2">Close</button>
+      </div>
     </div>
   </div>
 
+  <!-- Background-effect definitions. Each template's text is the effect's CSS;
+       the layer element is always <div class="bg-fx bg-fx-KEY"></div>. Same CSS
+       is used for the live preview AND the export, so what you see is what ships. -->
+  <div id="fxDefs" hidden>
+    <template data-fx="none" data-label="None"></template>
+
+    <template data-fx="stars" data-label="Stars">
+.bg-fx-stars {
+  background-image:
+    radial-gradient(1px 1px at 10% 20%, rgba(255,255,255,.5), transparent),
+    radial-gradient(1px 1px at 80% 10%, rgba(255,255,255,.4), transparent),
+    radial-gradient(2px 2px at 60% 70%, rgba(255,255,255,.3), transparent),
+    radial-gradient(1px 1px at 30% 80%, rgba(255,255,255,.4), transparent),
+    radial-gradient(1px 1px at 90% 60%, rgba(255,255,255,.3), transparent);
+  animation: bgfx-drift 60s linear infinite;
+  opacity: .8;
+}
+@keyframes bgfx-drift { from { transform: translateY(0); } to { transform: translateY(-200px); } }
+    </template>
+
+    <template data-fx="twinkle" data-label="Twinkle">
+.bg-fx-twinkle {
+  background-image:
+    radial-gradient(1px 1px at 15% 25%, rgba(255,255,255,.6), transparent),
+    radial-gradient(1px 1px at 70% 15%, rgba(255,255,255,.5), transparent),
+    radial-gradient(2px 2px at 45% 60%, rgba(255,255,255,.4), transparent),
+    radial-gradient(1px 1px at 85% 75%, rgba(255,255,255,.5), transparent);
+}
+.bg-fx-twinkle::after {
+  content: ""; position: absolute; inset: 0;
+  background-image:
+    radial-gradient(1px 1px at 30% 40%, #fff, transparent),
+    radial-gradient(1px 1px at 60% 80%, #fff, transparent),
+    radial-gradient(1px 1px at 90% 30%, #fff, transparent),
+    radial-gradient(2px 2px at 20% 90%, #fff, transparent);
+  animation: bgfx-twinkle 3.5s ease-in-out infinite alternate;
+}
+@keyframes bgfx-twinkle { from { opacity: .15; } to { opacity: .9; } }
+    </template>
+
+    <template data-fx="aurora" data-label="Aurora">
+.bg-fx-aurora::before, .bg-fx-aurora::after {
+  content: ""; position: absolute; border-radius: 50%;
+  filter: blur(70px); opacity: .55;
+}
+.bg-fx-aurora::before {
+  width: 65vw; height: 65vw; left: -12vw; top: -22vh;
+  background: radial-gradient(circle, var(--accent), transparent 60%);
+  animation: bgfx-aurora1 18s ease-in-out infinite alternate;
+}
+.bg-fx-aurora::after {
+  width: 58vw; height: 58vw; right: -12vw; bottom: -22vh;
+  background: radial-gradient(circle, var(--accent2), transparent 60%);
+  animation: bgfx-aurora2 22s ease-in-out infinite alternate;
+}
+@keyframes bgfx-aurora1 { from { transform: translate(0,0); } to { transform: translate(18vw,10vh); } }
+@keyframes bgfx-aurora2 { from { transform: translate(0,0); } to { transform: translate(-16vw,-10vh); } }
+    </template>
+
+    <template data-fx="nebula" data-label="Nebula">
+.bg-fx-nebula {
+  background:
+    radial-gradient(42vw 42vw at 22% 22%, color-mix(in srgb, var(--accent) 32%, transparent), transparent 70%),
+    radial-gradient(42vw 42vw at 78% 62%, color-mix(in srgb, var(--accent2) 32%, transparent), transparent 70%);
+  filter: blur(24px);
+  animation: bgfx-nebula 20s ease-in-out infinite alternate;
+}
+@keyframes bgfx-nebula { from { transform: scale(1) translate(0,0); } to { transform: scale(1.15) translate(0,-4vh); } }
+    </template>
+
+    <template data-fx="snow" data-label="Snow">
+.bg-fx-snow, .bg-fx-snow::after {
+  background-image:
+    radial-gradient(2px 2px at 20% 10%, #fff, transparent),
+    radial-gradient(2px 2px at 60% 30%, #fff, transparent),
+    radial-gradient(1px 1px at 80% 50%, #fff, transparent),
+    radial-gradient(2px 2px at 40% 70%, #fff, transparent),
+    radial-gradient(1px 1px at 10% 90%, #fff, transparent);
+  background-size: 200px 200px;
+  animation: bgfx-snow 9s linear infinite;
+  opacity: .7;
+}
+.bg-fx-snow::after { content: ""; position: absolute; inset: 0; background-size: 320px 320px; animation-duration: 15s; opacity: .4; }
+@keyframes bgfx-snow { from { background-position: 0 -200px; } to { background-position: 0 200px; } }
+    </template>
+
+    <template data-fx="drift" data-label="Color drift">
+.bg-fx-drift {
+  background: linear-gradient(120deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent) 20%, transparent) 28%,
+    transparent 55%,
+    color-mix(in srgb, var(--accent2) 20%, transparent) 80%,
+    transparent 100%);
+  background-size: 220% 220%;
+  animation: bgfx-driftmove 16s ease infinite;
+}
+@keyframes bgfx-driftmove { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+    </template>
+
+    <template data-fx="grid" data-label="Neon grid">
+.bg-fx-grid {
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--accent) 24%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--accent) 24%, transparent) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(circle at 50% 0%, #000 30%, transparent 78%);
+  mask-image: radial-gradient(circle at 50% 0%, #000 30%, transparent 78%);
+  animation: bgfx-grid 6s linear infinite;
+  opacity: .55;
+}
+@keyframes bgfx-grid { from { background-position: 0 0, 0 0; } to { background-position: 0 44px, 44px 0; } }
+    </template>
+  </div>
+
 <script>
-  // ── Tagline typing animation ──
   (function () {
-    const taglines = ${JSON.stringify(cfg.taglines)};
-    const el = document.getElementById('taglineText');
-    if (!el || !taglines.length) return;
+    var INITIAL_THEME = ${JSON.stringify(initialTheme)};
+    var INITIAL_EFFECT = ${JSON.stringify(cfg.backgroundEffect || "none")};
 
-    let textIndex = 0, charIndex = 0, deleting = false;
-    const TYPE_SPEED        = 55;
-    const DELETE_SPEED      = 30;
-    const HOLD_AFTER_TYPE   = 2800;
-    const HOLD_AFTER_DELETE = 300;
+    var COLOR_FIELDS = [
+      { key: "accentColor",  label: "Accent",          type: "hex"  },
+      { key: "accentColor2", label: "Accent 2",        type: "hex"  },
+      { key: "textColor",    label: "Text",            type: "hex"  },
+      { key: "playBtnText",  label: "Play-button icon", type: "hex" },
+      { key: "panelBg",      label: "Panel",           type: "rgba" },
+      { key: "overlayDark",  label: "Overlay",         type: "rgba" }
+    ];
 
-    function tick() {
-      const current = taglines[textIndex];
-      if (!deleting) {
-        charIndex++;
-        el.textContent = current.slice(0, charIndex);
-        if (charIndex === current.length) {
-          deleting = true;
-          setTimeout(tick, HOLD_AFTER_TYPE);
-          return;
-        }
-        setTimeout(tick, TYPE_SPEED);
-      } else {
-        charIndex--;
-        el.textContent = current.slice(0, charIndex);
-        if (charIndex === 0) {
-          deleting = false;
-          textIndex = (textIndex + 1) % taglines.length;
-          setTimeout(tick, HOLD_AFTER_DELETE);
-          return;
-        }
-        setTimeout(tick, DELETE_SPEED);
+    var theme = {};
+    for (var k in INITIAL_THEME) theme[k] = INITIAL_THEME[k];
+    var stops = parseGradient(theme.bodyBg);
+    var effect = INITIAL_EFFECT;
+
+    // ── color helpers ──
+    function clamp255(n) { n = Math.round(n); return n < 0 ? 0 : n > 255 ? 255 : n; }
+    function hexToRgb(hex) {
+      hex = String(hex).trim().replace("#", "");
+      if (hex.length === 3) hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
+      var n = parseInt(hex, 16);
+      if (isNaN(n) || hex.length !== 6) return { r: 255, g: 255, b: 255 };
+      return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    }
+    function rgbToHex(r, g, b) {
+      function h(v) { v = clamp255(v).toString(16); return v.length === 1 ? "0" + v : v; }
+      return "#" + h(r) + h(g) + h(b);
+    }
+    function parseRgba(str) {
+      var m = String(str).match(/(-?\\d*\\.?\\d+)/g);
+      if (m && m.length >= 3) {
+        return { r: +m[0], g: +m[1], b: +m[2], a: m.length >= 4 ? +m[3] : 1 };
       }
+      var rgb = hexToRgb(str);
+      return { r: rgb.r, g: rgb.g, b: rgb.b, a: 1 };
     }
-    setTimeout(tick, 600);
-  })();
-</script>
-
-<script>
-  // ── Music player: fetch metadata.json, build every playlist (tags ignored) plus a merged "All" list ──
-  (function () {
-    const audio = document.getElementById('audio');
-    if (!audio) return;
-
-    const METADATA_URL = ${JSON.stringify(METADATA_URL)};
-    const RAW_BASE = ${JSON.stringify(RAW_BASE)};
-    const ALL_PLAYLIST_NAME = 'All';
-
-    const statusEl       = document.getElementById('playerStatus');
-    const topEl          = document.getElementById('playerTop');
-    const controlsEl     = document.getElementById('playerControls');
-    const volumeEl       = document.getElementById('volumeGroup');
-    const art            = document.getElementById('playerArt');
-    const titleEl        = document.getElementById('playerTitle');
-    const artistEl       = document.getElementById('playerArtist');
-    const countEl        = document.getElementById('playerCount');
-    const seek           = document.getElementById('seek');
-    const cur            = document.getElementById('cur');
-    const dur            = document.getElementById('dur');
-    const playBtn        = document.getElementById('playBtn');
-    const prevBtn        = document.getElementById('prevBtn');
-    const nextBtn        = document.getElementById('nextBtn');
-    const volBtn         = document.getElementById('volBtn');
-    const volIcon        = document.getElementById('volIcon');
-    const volSlider      = document.getElementById('volSlider');
-    const playlistsPanel = document.getElementById('playlistsPanel');
-    const playlistsRow   = document.getElementById('playlistsRow');
-
-    const PLAY_ICON = '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l10-5.5z"/></svg>';
-    const PAUSE_ICON = '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="2.5" width="3.5" height="11" rx="1"/><rect x="9.5" y="2.5" width="3.5" height="11" rx="1"/></svg>';
-    const VOL_ICON = '<path d="M2 6h2.6L8 3.2v9.6L4.6 10H2z"/><path d="M10.2 5.2a3 3 0 0 1 0 5.6v-1.3a1.7 1.7 0 0 0 0-3z"/>';
-    const VOL_MUTE_ICON = '<path d="M2 6h2.6L8 3.2v9.6L4.6 10H2z"/><path d="M10.5 5.5l3.5 5M14 5.5l-3.5 5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>';
-
-    let playlists = [];         // [{ name, tracks }]
-    let activePlaylist = null;
-    let tracks = [];
-    let index = 0;
-    let lyricsData = [];       // parsed [{time, text}] when synced
-    let currentLyricIndex = -1;
-    let lastVolume = 1;
-
-    function rawUrl(path) {
-      return RAW_BASE + String(path).split('/').map(encodeURIComponent).join('/');
+    function composeRgba(r, g, b, a) {
+      return "rgba(" + clamp255(r) + ", " + clamp255(g) + ", " + clamp255(b) + ", " + a + ")";
     }
+    function isHex(v) { return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(String(v).trim()); }
 
-    function fmt(s) {
-      if (!isFinite(s)) return '0:00';
-      const m = Math.floor(s / 60), sec = Math.floor(s % 60);
-      return m + ':' + String(sec).padStart(2, '0');
-    }
-
-    // ── LRC parsing ────────────────────────────────────────────
-    const timeRegex = /\\[(\\d{2}):(\\d{2})[.:](\\d{2,3})\\]/;
-    function parseLRC(raw) {
-      if (!raw) return { synced: [], plain: null };
-      const lines = String(raw).split(/\\r?\\n/);
-      const parsed = [];
-      let anyTimestamp = false;
-      for (const line of lines) {
-        const match = timeRegex.exec(line);
-        if (match) {
-          anyTimestamp = true;
-          const min = parseInt(match[1], 10);
-          const sec = parseInt(match[2], 10);
-          const ms = parseInt(match[3], 10) * (match[3].length === 2 ? 10 : 1);
-          const time = min * 60 + sec + ms / 1000;
-          const text = line.replace(timeRegex, '').trim();
-          parsed.push({ time, text });
-        }
-      }
-      if (anyTimestamp) {
-        return { synced: parsed.sort((a, b) => a.time - b.time), plain: null };
-      }
-      // no timestamps found -- treat as plain lyrics, drop blank lines
-      const plainLines = lines.map(l => l.trim()).filter(Boolean);
-      return { synced: [], plain: plainLines.length ? plainLines : null };
-    }
-
-    function renderSyncedLyrics(data) {
-      const container = document.getElementById('playerLyrics');
-      if (!container) return;
-      container.classList.remove('plain');
-      container.innerHTML = '<div class="player-lyrics-track" id="lyricsTrack"></div>';
-      const track = document.getElementById('lyricsTrack');
-      data.forEach((lyric, i) => {
-        const div = document.createElement('div');
-        div.className = 'player-lyric-line';
-        div.id = 'lyric-' + i;
-        div.dataset.raw = lyric.text || '';
-        div.textContent = lyric.text || '';
-        track.appendChild(div);
+    function parseGradient(str) {
+      return String(str).split(",").map(function (part) {
+        part = part.trim();
+        var mm = part.match(/(.*?)\\s+(-?\\d*\\.?\\d+)%$/);
+        if (mm) return { color: mm[1].trim(), pos: +mm[2] };
+        return { color: part, pos: 0 };
       });
     }
-
-    function renderPlainLyrics(lines) {
-      const container = document.getElementById('playerLyrics');
-      if (!container) return;
-      container.classList.add('plain');
-      container.innerHTML = '';
-      lines.forEach((line) => {
-        const div = document.createElement('div');
-        div.className = 'player-lyric-line';
-        div.textContent = line;
-        container.appendChild(div);
-      });
+    function composeGradient(list) {
+      return list.map(function (s) { return s.color + " " + s.pos + "%"; }).join(", ");
     }
 
-    function renderNoLyrics() {
-      const container = document.getElementById('playerLyrics');
-      if (!container) return;
-      container.classList.remove('plain');
-      container.innerHTML = '<div class="player-lyric-line" style="opacity:.5;">No lyrics available</div>';
-    }
+    // ── build color controls ──
+    var colorFields = document.getElementById("colorFields");
+    COLOR_FIELDS.forEach(function (f) {
+      var row = document.createElement("div");
+      row.className = "field";
+      var lbl = document.createElement("label");
+      lbl.textContent = f.label;
+      row.appendChild(lbl);
 
-    function scrollToActive(idx) {
-      const container = document.getElementById('playerLyrics');
-      const track = document.getElementById('lyricsTrack');
-      if (!container || !track) return;
-      const targetIdx = idx < 0 ? 0 : idx;
-      const el = document.getElementById('lyric-' + targetIdx);
-      if (!el) return;
-      const elTop = el.offsetTop;
-      const elHeight = el.offsetHeight;
-      const containerHeight = container.offsetHeight;
-      const offset = -(elTop - (containerHeight / 2) + (elHeight / 2));
-      track.style.transform = 'translateY(' + offset + 'px)';
-    }
-
-    function prewrapLine(el) {
-      if (!el) return;
-      const text = el.dataset.raw;
-      if (!text) return;
-      const words = text.split(' ');
-      if (words.length < 3) return;
-
-      const width = el.offsetWidth;
-      const probe = document.createElement('span');
-      probe.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;font-size:13.5px;font-weight:600;padding:0 10px;box-sizing:border-box;';
-      document.body.appendChild(probe);
-
-      let bestSplit = -1;
-      for (let i = 1; i < words.length; i++) {
-        probe.textContent = words.slice(0, i).join(' ');
-        if (probe.offsetWidth <= width) {
-          bestSplit = i;
-        } else {
-          break;
+      if (f.type === "hex") {
+        var picker = document.createElement("input");
+        picker.type = "color";
+        picker.value = isHex(theme[f.key]) ? theme[f.key] : "#ffffff";
+        var text = document.createElement("input");
+        text.type = "text"; text.value = theme[f.key];
+        picker.addEventListener("input", function () { theme[f.key] = picker.value; text.value = picker.value; apply(); });
+        text.addEventListener("input", function () {
+          theme[f.key] = text.value.trim();
+          if (isHex(theme[f.key])) picker.value = theme[f.key];
+          apply();
+        });
+        row.appendChild(picker); row.appendChild(text);
+      } else { // rgba
+        var c = parseRgba(theme[f.key]);
+        var picker2 = document.createElement("input");
+        picker2.type = "color"; picker2.value = rgbToHex(c.r, c.g, c.b);
+        var alpha = document.createElement("input");
+        alpha.type = "range"; alpha.min = "0"; alpha.max = "100"; alpha.value = Math.round(c.a * 100);
+        var text2 = document.createElement("input");
+        text2.type = "text"; text2.value = theme[f.key];
+        function recompose() {
+          var rgb = hexToRgb(picker2.value);
+          var a = (+alpha.value) / 100;
+          theme[f.key] = composeRgba(rgb.r, rgb.g, rgb.b, a);
+          text2.value = theme[f.key]; apply();
         }
+        picker2.addEventListener("input", recompose);
+        alpha.addEventListener("input", recompose);
+        text2.addEventListener("input", function () {
+          theme[f.key] = text2.value.trim();
+          var p = parseRgba(theme[f.key]);
+          picker2.value = rgbToHex(p.r, p.g, p.b);
+          alpha.value = Math.round(p.a * 100);
+          apply();
+        });
+        row.appendChild(picker2); row.appendChild(alpha); row.appendChild(text2);
       }
-      document.body.removeChild(probe);
-
-      const fullProbe = document.createElement('span');
-      fullProbe.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;font-size:13.5px;font-weight:600;padding:0 10px;box-sizing:border-box;';
-      fullProbe.textContent = text;
-      document.body.appendChild(fullProbe);
-      const needsWrap = fullProbe.offsetWidth > width;
-      document.body.removeChild(fullProbe);
-
-      if (!needsWrap) return;
-      if (bestSplit > 0 && bestSplit < words.length) {
-        el.innerHTML = words.slice(0, bestSplit).join(' ') + '<br>' + words.slice(bestSplit).join(' ');
-      }
-    }
-
-    function syncLyrics(currentTime) {
-      if (!lyricsData.length) return;
-      let nextActive = -1;
-      for (let i = 0; i < lyricsData.length; i++) {
-        if (currentTime >= lyricsData[i].time) {
-          nextActive = i;
-        } else {
-          break;
-        }
-      }
-      if (nextActive !== currentLyricIndex) {
-        if (currentLyricIndex >= 0) {
-          const oldEl = document.getElementById('lyric-' + currentLyricIndex);
-          if (oldEl) oldEl.classList.remove('active');
-        }
-        currentLyricIndex = nextActive;
-        if (currentLyricIndex >= 0) {
-          const newEl = document.getElementById('lyric-' + currentLyricIndex);
-          if (newEl) {
-            prewrapLine(newEl);
-            newEl.classList.add('active');
-          }
-        }
-        scrollToActive(currentLyricIndex);
-      }
-    }
-
-    function loadTrack(i, autoplay) {
-      if (!tracks.length) return;
-      index = ((i % tracks.length) + tracks.length) % tracks.length;
-      const t = tracks[index];
-      audio.src = t.file;
-      if (art) art.src = t.cover || '';
-      if (titleEl) titleEl.textContent = t.title;
-      if (artistEl) artistEl.textContent = t.artist;
-      if (countEl) countEl.textContent = (index + 1) + ' / ' + tracks.length;
-
-      const { synced, plain } = parseLRC(t.lyricsRaw);
-      lyricsData = synced;
-      currentLyricIndex = -2;
-      if (synced.length) {
-        renderSyncedLyrics(synced);
-        syncLyrics(0);
-      } else if (plain) {
-        renderPlainLyrics(plain);
-      } else {
-        renderNoLyrics();
-      }
-
-      seek.value = 0;
-      cur.textContent = '0:00';
-      dur.textContent = '0:00';
-      if (autoplay) {
-        audio.play().catch(() => {});
-        playBtn.innerHTML = PAUSE_ICON;
-      } else {
-        playBtn.innerHTML = PLAY_ICON;
-      }
-    }
-
-    playBtn.addEventListener('click', () => {
-      if (!tracks.length) return;
-      if (audio.paused) { audio.play(); playBtn.innerHTML = PAUSE_ICON; }
-      else { audio.pause(); playBtn.innerHTML = PLAY_ICON; }
-    });
-    if (prevBtn) prevBtn.addEventListener('click', () => loadTrack(index - 1, true));
-    if (nextBtn) nextBtn.addEventListener('click', () => loadTrack(index + 1, true));
-    audio.addEventListener('ended', () => loadTrack(index + 1, true));
-    audio.addEventListener('loadedmetadata', () => { dur.textContent = fmt(audio.duration); });
-    audio.addEventListener('timeupdate', () => {
-      cur.textContent = fmt(audio.currentTime);
-      syncLyrics(audio.currentTime);
-      if (audio.duration) seek.value = (audio.currentTime / audio.duration) * 100;
-    });
-    seek.addEventListener('input', () => {
-      if (audio.duration) audio.currentTime = (seek.value / 100) * audio.duration;
+      colorFields.appendChild(row);
     });
 
-    function setVolume(v) {
-      audio.volume = v;
-      volSlider.value = Math.round(v * 100);
-      if (volIcon) volIcon.innerHTML = v === 0 ? VOL_MUTE_ICON : VOL_ICON;
-    }
-
-    if (volSlider) {
-      setVolume(1);
-      volSlider.addEventListener('input', () => {
-        const v = parseFloat(volSlider.value) / 100;
-        if (v > 0) lastVolume = v;
-        setVolume(v);
+    // ── build gradient controls ──
+    var gradFields = document.getElementById("gradFields");
+    function renderGradientRows() {
+      gradFields.innerHTML = "";
+      stops.forEach(function (s, i) {
+        var row = document.createElement("div");
+        row.className = "grad-stop";
+        var picker = document.createElement("input");
+        picker.type = "color"; picker.value = isHex(s.color) ? s.color : "#000000";
+        picker.addEventListener("input", function () { s.color = picker.value; syncGradient(); });
+        var text = document.createElement("input");
+        text.type = "text"; text.value = s.color;
+        text.style.width = "96px";
+        text.addEventListener("input", function () { s.color = text.value.trim(); if (isHex(s.color)) picker.value = s.color; syncGradient(); });
+        var pos = document.createElement("input");
+        pos.type = "number"; pos.min = "0"; pos.max = "100"; pos.value = s.pos;
+        pos.addEventListener("input", function () { s.pos = +pos.value; syncGradient(); });
+        var unit = document.createElement("span"); unit.className = "pos-unit"; unit.textContent = "%";
+        var del = document.createElement("button");
+        del.className = "mini-btn"; del.textContent = "✕";
+        del.title = "remove stop";
+        del.addEventListener("click", function () {
+          if (stops.length <= 2) return;
+          stops.splice(i, 1); renderGradientRows(); syncGradient();
+        });
+        row.appendChild(picker); row.appendChild(text); row.appendChild(pos); row.appendChild(unit); row.appendChild(del);
+        gradFields.appendChild(row);
       });
     }
-    if (volBtn) {
-      volBtn.addEventListener('click', () => {
-        if (audio.volume > 0) {
-          lastVolume = audio.volume;
-          setVolume(0);
-        } else {
-          setVolume(lastVolume || 1);
-        }
-      });
-    }
+    function syncGradient() { theme.bodyBg = composeGradient(stops); apply(); }
+    document.getElementById("addStop").addEventListener("click", function () {
+      var last = stops[stops.length - 1];
+      stops.push({ color: last ? last.color : "#000000", pos: 100 });
+      renderGradientRows(); syncGradient();
+    });
+    renderGradientRows();
 
-    function selectPlaylist(name, autoplay) {
-      activePlaylist = name;
-      const found = playlists.find((p) => p.name === name);
-      tracks = found ? found.tracks : [];
-      renderPlaylistPills();
-      if (tracks.length) {
-        loadTrack(0, !!autoplay);
+    // ── background effects ──
+    var EFFECTS = {};   // key -> { label, css }
+    var fxGrid = document.getElementById("fxGrid");
+    var defs = document.querySelectorAll("#fxDefs template");
+    for (var i = 0; i < defs.length; i++) {
+      var t = defs[i];
+      var key = t.getAttribute("data-fx");
+      EFFECTS[key] = { label: t.getAttribute("data-label"), css: (t.innerHTML || "").trim() };
+    }
+    Object.keys(EFFECTS).forEach(function (key) {
+      var opt = document.createElement("button");
+      opt.className = "fx-opt" + (key === effect ? " active" : "");
+      opt.setAttribute("data-fx", key);
+      var swatch = document.createElement("div");
+      swatch.className = "swatch" + (key !== "none" ? " bg-fx-" + key : "");
+      // give the swatch its own theme colors so the mini-preview reads well
+      swatch.style.setProperty("--accent", "#7dd3fc");
+      swatch.style.setProperty("--accent2", "#c084fc");
+      var span = document.createElement("span");
+      span.textContent = EFFECTS[key].label;
+      opt.appendChild(swatch); opt.appendChild(span);
+      opt.addEventListener("click", function () {
+        effect = this.getAttribute("data-fx");
+        var all = fxGrid.querySelectorAll(".fx-opt");
+        for (var j = 0; j < all.length; j++) all[j].classList.remove("active");
+        this.classList.add("active");
+        apply();
+      });
+      fxGrid.appendChild(opt);
+    });
+
+    // per-swatch CSS lives in a global style tag (uses the same effect CSS)
+    var swatchStyle = document.createElement("style");
+    var swatchCss = "";
+    Object.keys(EFFECTS).forEach(function (key) { swatchCss += EFFECTS[key].css + "\\n"; });
+    swatchStyle.textContent = swatchCss;
+    document.head.appendChild(swatchStyle);
+
+    // ── apply to preview ──
+    var previewRoot = document.getElementById("previewRoot");
+    var stage = document.querySelector(".preview");
+    var fxLayer = document.getElementById("fxLayer");
+    var fxStyle = document.createElement("style");
+    document.head.appendChild(fxStyle);
+
+    function apply() {
+      // vars go on the shared stage so BOTH the card and the effect layer inherit them
+      stage.style.setProperty("--accent", theme.accentColor);
+      stage.style.setProperty("--accent2", theme.accentColor2);
+      stage.style.setProperty("--panel-bg", theme.panelBg);
+      stage.style.setProperty("--text", theme.textColor);
+      stage.style.setProperty("--overlay-dark", theme.overlayDark);
+      stage.style.setProperty("--play-text", theme.playBtnText);
+      previewRoot.style.background = "radial-gradient(circle at 50% 0%, " + theme.bodyBg + ")";
+      fxLayer.className = (effect && effect !== "none") ? "bg-fx bg-fx-" + effect : "";
+      fxStyle.textContent = (effect && EFFECTS[effect]) ? EFFECTS[effect].css : "";
+    }
+    apply();
+
+    // ── export ──
+    function pad(s, n) { s = String(s); while (s.length < n) s += " "; return s; }
+    function buildExport() {
+      var lines = [];
+      lines.push("/* ── Theme colors — paste into each page's CONFIG ── */");
+      lines.push('  ' + pad("accentColor:", 14) + '"' + theme.accentColor + '",');
+      lines.push('  ' + pad("accentColor2:", 14) + '"' + theme.accentColor2 + '",');
+      lines.push('  ' + pad("bodyBg:", 14) + '"' + theme.bodyBg + '",');
+      lines.push('  ' + pad("panelBg:", 14) + '"' + theme.panelBg + '",');
+      lines.push('  ' + pad("textColor:", 14) + '"' + theme.textColor + '",');
+      lines.push('  ' + pad("overlayDark:", 14) + '"' + theme.overlayDark + '",');
+      lines.push('  ' + pad("playBtnText:", 14) + '"' + theme.playBtnText + '",');
+      lines.push("");
+
+      if (effect && effect !== "none") {
+        lines.push("/* ── Background effect: \\"" + effect + "\\" ── */");
+        lines.push("/* 1) drop this element in right after <body> (replaces the old <div class=\\"stars\\">): */");
+        lines.push('<div class="bg-fx bg-fx-' + effect + '"></div>');
+        lines.push("");
+        lines.push("/* 2) add this CSS to the page <style> (it reads --accent/--accent2 from :root): */");
+        lines.push(".bg-fx { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }");
+        lines.push(EFFECTS[effect].css);
+        lines.push("");
       } else {
-        if (titleEl) titleEl.textContent = 'Empty playlist';
-        if (artistEl) artistEl.textContent = '';
-        if (countEl) countEl.textContent = '0 / 0';
+        lines.push("/* Background effect: none */");
+        lines.push("");
       }
+
+      lines.push("/* ── JSON (for tooling) ── */");
+      lines.push(JSON.stringify({
+        colors: {
+          accentColor: theme.accentColor, accentColor2: theme.accentColor2,
+          bodyBg: theme.bodyBg, panelBg: theme.panelBg, textColor: theme.textColor,
+          overlayDark: theme.overlayDark, playBtnText: theme.playBtnText
+        },
+        backgroundEffect: effect
+      }, null, 2));
+      return lines.join("\\n");
     }
 
-    function renderPlaylistPills() {
-      playlistsRow.innerHTML = '';
-      playlists.forEach((pl) => {
-        const pill = document.createElement('button');
-        pill.type = 'button';
-        pill.className = 'playlist-pill' + (activePlaylist === pl.name ? ' active' : '');
-        pill.textContent = pl.name;
-        pill.addEventListener('click', () => selectPlaylist(pl.name));
-        playlistsRow.appendChild(pill);
-      });
-    }
+    var modal = document.getElementById("modal");
+    var exportText = document.getElementById("exportText");
+    function openModal() { exportText.value = buildExport(); modal.classList.add("open"); }
+    function closeModal() { modal.classList.remove("open"); }
+    document.getElementById("exportBtn").addEventListener("click", openModal);
+    document.getElementById("modalClose").addEventListener("click", closeModal);
+    document.getElementById("modalClose2").addEventListener("click", closeModal);
+    modal.addEventListener("click", function (e) { if (e.target === modal) closeModal(); });
+    document.getElementById("copyBtn").addEventListener("click", function () {
+      exportText.removeAttribute("readonly");
+      exportText.select();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) {}
+      if (navigator.clipboard) { navigator.clipboard.writeText(exportText.value).catch(function(){}); ok = true; }
+      exportText.setAttribute("readonly", "readonly");
+      var btn = document.getElementById("copyBtn");
+      var old = btn.textContent; btn.textContent = ok ? "Copied!" : "Press Ctrl+C";
+      setTimeout(function () { btn.textContent = old; }, 1400);
+    });
 
-    // ── Fetch metadata.json from GitHub and build every playlist found ──
-    // Tags like "showOnWorker" are ignored here; every playlist tag on
-    // every track is included, plus a merged "All" list of every track.
-    fetch(METADATA_URL, { cache: 'no-store' })
-      .then((r) => {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      })
-      .then((meta) => {
-        const rawTracks = Array.isArray(meta) ? meta : (Array.isArray(meta.tracks) ? meta.tracks : []);
-
-        const allTracks = rawTracks.map((e) => {
-          let playlistOrders = {};
-          const pl = e.playlists;
-          if (pl && typeof pl === 'object' && !Array.isArray(pl)) {
-            playlistOrders = pl;
-          } else if (Array.isArray(pl)) {
-            pl.forEach((name, i) => { if (name) playlistOrders[name] = i; });
-          } else if (e.playlist) {
-            playlistOrders[e.playlist] = 0;
-          }
-          return {
-            title:      e.title || 'Unknown',
-            artist:     e.uploader || '',
-            file:       rawUrl(e.file || ''),
-            cover:      e.thumbnail || '',
-            lyricsRaw:  e.lyrics || '',
-            playlistOrders,
-          };
-        });
-
-        const byName = new Map();
-        allTracks.forEach((t) => {
-          Object.keys(t.playlistOrders).forEach((name) => {
-            if (!byName.has(name)) byName.set(name, []);
-            byName.get(name).push(t);
-          });
-        });
-        playlists = Array.from(byName, ([name, list]) => {
-          list.sort((a, b) => a.playlistOrders[name] - b.playlistOrders[name]);
-          return { name, tracks: list };
-        });
-
-        // Merged "All" list, with every track from the manifest in order.
-        if (allTracks.length) {
-          playlists.unshift({ name: ALL_PLAYLIST_NAME, tracks: allTracks.slice() });
-        }
-
-        if (!playlists.length) {
-          statusEl.textContent = 'No tracks found in metadata.json yet.';
-          return;
-        }
-
-        playlistsPanel.style.display = 'flex';
-        selectPlaylist(playlists[0].name, false);
-
-        statusEl.style.display = 'none';
-        topEl.style.display = 'flex';
-        controlsEl.style.display = 'flex';
-        volumeEl.style.display = 'flex';
-      })
-      .catch((err) => {
-        statusEl.textContent = 'Failed to load metadata.json: ' + err.message;
-        statusEl.classList.add('error');
-      });
+    // ── reset ──
+    document.getElementById("resetBtn").addEventListener("click", function () {
+      for (var kk in INITIAL_THEME) theme[kk] = INITIAL_THEME[kk];
+      stops = parseGradient(theme.bodyBg);
+      effect = INITIAL_EFFECT;
+      // rebuild the whole panel simply by reloading (keeps code small + correct)
+      location.reload();
+    });
   })();
 </script>
 </body>
 </html>`;
 }
 
-// ─── Worker export ────────────────────────────────────────────────────────────
 export default {
   async fetch(request, env, ctx) {
     const html = renderPage(CONFIG);

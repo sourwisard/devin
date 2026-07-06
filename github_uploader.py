@@ -7,7 +7,8 @@ built-in audio player, then upload selected tracks to GitHub.
 Requirements:
     pip install yt-dlp pillow
     ffplay and ffmpeg must be in PATH  (both come with the ffmpeg install)
-    (ffmpeg is used to convert downloaded tracks to .mp4 before upload)
+    (ffmpeg strips any video stream and converts downloaded tracks to an
+     audio-only .mp4 before upload, kept under GitHub's size limit)
 """
 
 import io
@@ -224,32 +225,62 @@ def download_track(video_url: str, dest_dir: str, progress_cb=None) -> str:
     return max(candidates, key=os.path.getsize)
 
 
-def convert_to_mp4(local_file: str, status_cb=None) -> str:
-    """Convert a downloaded audio file to an .mp4 container if it isn't one
-    already. Uses ffmpeg (AAC audio, no video track). Returns the path to
-    the file that should actually be uploaded (original if already .mp4)."""
-    ext = os.path.splitext(local_file)[1].lower()
-    if ext == ".mp4":
-        return local_file
+# GitHub rejects files over 100 MB; keep uploads comfortably under that.
+MAX_UPLOAD_MB = 25
+# AAC bitrates (kbps) tried from best to worst until the result fits the cap.
+_AUDIO_BITRATES = [192, 160, 128, 96, 64]
 
-    out_file = os.path.splitext(local_file)[0] + ".mp4"
-    if status_cb:
-        status_cb("converting to mp4...")
 
-    cmd = ["ffmpeg", "-y", "-i", local_file,
-           "-vn", "-c:a", "aac", "-b:a", "192k", out_file]
-    result = subprocess.run(
-        cmd, capture_output=True, text=True,
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+def convert_to_mp4(local_file: str, status_cb=None, max_mb: int = MAX_UPLOAD_MB) -> str:
+    """Re-encode a downloaded file to an audio-only .mp4 (AAC), always dropping
+    any video stream (`-vn`) so nothing large is ever uploaded -- yt-dlp's
+    `best` fallback can hand us a full video, which we never want to push since
+    there's no video player. If the audio is still over `max_mb`, re-encode at
+    progressively lower bitrates until it fits. Returns the path to upload."""
+    base = os.path.splitext(local_file)[0]
+    max_bytes = max_mb * 1024 * 1024
+    tmp_out = base + ".audio.m4a"
 
-    if result.returncode != 0 or not os.path.isfile(out_file):
+    result = None
+    fitted = False
+    for br in _AUDIO_BITRATES:
+        if status_cb:
+            status_cb(f"audio {br}k...")
+        cmd = ["ffmpeg", "-y", "-i", local_file,
+               "-vn", "-c:a", "aac", "-b:a", f"{br}k", tmp_out]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        if result.returncode != 0 or not os.path.isfile(tmp_out):
+            raise RuntimeError(
+                f"ffmpeg audio conversion failed: {(result.stderr or '')[-400:]}")
+        if os.path.getsize(tmp_out) <= max_bytes:
+            fitted = True
+            break
+
+    if not fitted:
+        size_mb = os.path.getsize(tmp_out) / (1024 * 1024)
+        try:
+            os.remove(tmp_out)
+        except Exception:
+            pass
         raise RuntimeError(
-            f"ffmpeg conversion to mp4 failed: {(result.stderr or '')[-400:]}")
+            f"audio is {size_mb:.0f} MB even at {_AUDIO_BITRATES[-1]}k, "
+            f"over the {max_mb} MB limit -- skipping (too long to upload).")
 
+    out_file = base + ".mp4"
     try:
-        os.remove(local_file)
+        if os.path.exists(out_file) and os.path.abspath(out_file) != os.path.abspath(tmp_out):
+            os.remove(out_file)
     except Exception:
         pass
+    os.replace(tmp_out, out_file)
+
+    if os.path.abspath(local_file) != os.path.abspath(out_file):
+        try:
+            os.remove(local_file)
+        except Exception:
+            pass
     return out_file
 
 
@@ -551,13 +582,27 @@ def save_metadata(path, tracks, playlist_settings):
 
 
 # The 4 placeholder fields are reserved for future per-playlist settings
-# (not read by the worker yet) -- kept alongside showOnWorker so the
+# (not read by the workers yet) -- kept alongside the per-page flags so the
 # schema doesn't need to change again when they're wired up later.
 PLACEHOLDER_KEYS = ["placeholder1", "placeholder2", "placeholder3", "placeholder4"]
 
+# Each bio-page worker reads its own per-page flag out of a playlist's
+# settings to decide whether to surface that playlist. "showOnWorker" is the
+# original flag and stays mapped to the C1oud page for backward compatibility
+# (C1oud.js still reads it); the rest are one per additional page.
+# (settings_key, page_label) -- page_label matches each worker's CONFIG.name.
+WORKER_PAGES = [
+    ("showOnWorker", "C1oud"),
+    ("showOnLay", "lay"),
+    ("showOnCheezit", "cheezit"),
+    ("showOnKat", "Kat"),
+]
+
 
 def default_playlist_settings():
-    settings = {"showOnWorker": False}
+    settings = {}
+    for key, _label in WORKER_PAGES:
+        settings[key] = False
     for key in PLACEHOLDER_KEYS:
         settings[key] = ""
     return settings
@@ -769,7 +814,7 @@ class LibraryDialog(tk.Toplevel):
         self._thumb_images = []
         self._view: Optional[str] = None          # None = "All Tracks"
         self._playlist_orders: dict = {}           # name -> [TrackRow, ...]
-        self._playlist_settings: dict = {}          # name -> {showOnWorker, placeholder1..4}
+        self._playlist_settings: dict = {}          # name -> {showOn<page>..., placeholder1..4}
 
         top = tk.Frame(self, bg=SURFACE, pady=10, padx=16)
         top.pack(fill="x")
@@ -796,22 +841,29 @@ class LibraryDialog(tk.Toplevel):
         self._pills_row.pack(side="left", fill="x", expand=True)
 
         # Per-playlist settings: only shown while a specific playlist tab
-        # (not "All Tracks") is selected. "Show on worker" is the tag that
-        # decides whether the Cloudflare Worker (C1oud.js) will surface this
-        # playlist at all -- untagged playlists never appear there. The 4
+        # (not "All Tracks") is selected. The per-page checkboxes decide which
+        # bio-page worker(s) surface this playlist -- each page reads its own
+        # flag, so a playlist can appear on any combination of pages. The 4
         # "Reserved" boxes aren't used by anything yet; they're just saved
-        # alongside showOnWorker for future features.
+        # alongside the per-page flags for future features.
         self._settings_frame = tk.Frame(self, bg=SURFACE, padx=16, pady=8)
         self._settings_name_lbl = tk.Label(
             self._settings_frame, text="", font=FONT_BODY, bg=SURFACE, fg=TEXT)
         self._settings_name_lbl.pack(side="left", padx=(0, 12))
-        self._show_on_worker_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            self._settings_frame, text="Show on worker",
-            variable=self._show_on_worker_var,
-            bg=SURFACE, activebackground=SURFACE, fg=TEXT, selectcolor=CARD,
-            relief="flat", bd=0, command=self._on_show_on_worker_toggle
-        ).pack(side="left", padx=(0, 16))
+        self._page_vars = {}          # settings_key -> BooleanVar
+        pages_box = tk.Frame(self._settings_frame, bg=SURFACE)
+        pages_box.pack(side="left", padx=(0, 16))
+        tk.Label(pages_box, text="Show on:", font=FONT_TINY,
+                 bg=SURFACE, fg=MUTED).pack(side="left", padx=(0, 6))
+        for key, label in WORKER_PAGES:
+            var = tk.BooleanVar(value=False)
+            self._page_vars[key] = var
+            tk.Checkbutton(
+                pages_box, text=label, variable=var,
+                bg=SURFACE, activebackground=SURFACE, fg=TEXT, selectcolor=CARD,
+                relief="flat", bd=0,
+                command=lambda k=key: self._on_page_toggle(k)
+            ).pack(side="left", padx=(0, 8))
         self._placeholder_entries = []
         for i, key in enumerate(PLACEHOLDER_KEYS):
             box = tk.Frame(self._settings_frame, bg=SURFACE)
@@ -1019,16 +1071,17 @@ class LibraryDialog(tk.Toplevel):
             return
         settings = self._playlist_settings.setdefault(name, default_playlist_settings())
         self._settings_name_lbl.configure(text=name)
-        self._show_on_worker_var.set(bool(settings.get("showOnWorker", False)))
+        for key, var in self._page_vars.items():
+            var.set(bool(settings.get(key, False)))
         for key, var in self._placeholder_entries:
             var.set(settings.get(key, ""))
         self._settings_frame.pack(fill="x", after=self._views_frame)
 
-    def _on_show_on_worker_toggle(self):
+    def _on_page_toggle(self, key):
         if self._view is None:
             return
         settings = self._playlist_settings.setdefault(self._view, default_playlist_settings())
-        settings["showOnWorker"] = self._show_on_worker_var.get()
+        settings[key] = self._page_vars[key].get()
 
     def _on_placeholder_change(self, key):
         if self._view is None:
@@ -1159,7 +1212,7 @@ class LibraryDialog(tk.Toplevel):
                         new_meta.append(e)
 
                 # Merge playlist settings: start from whatever's newest on
-                # the remote (so showOnWorker/reserved boxes toggled
+                # the remote (so per-page/reserved boxes toggled
                 # elsewhere aren't lost), then layer our own edits on top,
                 # and make sure every playlist that still has members ends
                 # up with a settings entry (defaulting to not shown).
@@ -1701,9 +1754,8 @@ class UploaderApp(tk.Tk):
                     self.after(0, lambda r=row: r.set_upload_status("downloading", MUTED))
                     local = download_track(track["url"], tmp_dir, progress_cb=_prog)
 
-                    if os.path.splitext(local)[1].lower() != ".mp4":
-                        self.after(0, lambda r=row: r.set_upload_status("converting", MUTED))
-                        local = convert_to_mp4(local)
+                    self.after(0, lambda r=row: r.set_upload_status("converting", MUTED))
+                    local = convert_to_mp4(local, status_cb=_prog)
 
                     self.after(0, lambda r=row: r.set_upload_status("lyrics...", MUTED))
                     track["lyrics"] = fetch_lyrics(title, track.get("uploader", ""))
